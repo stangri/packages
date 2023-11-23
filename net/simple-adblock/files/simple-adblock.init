@@ -90,6 +90,197 @@ awk='awk'
 load_environment_flag=
 
 debug() { local i j; for i in "$@"; do eval "j=\$$i"; echo "${i}: ${j} "; done; }
+dnsmasq_hup() { killall -q -s HUP dnsmasq; }
+dnsmasq_kill() { killall -q -s KILL dnsmasq; }
+dnsmasq_restart() { /etc/init.d/dnsmasq restart >/dev/null 2>&1; }
+is_enabled() { uci -q get "${1}.config.enabled"; }
+is_integer() {
+	case "$1" in
+		(*[!0123456789]*) return 1;;
+		('')              return 1;;
+		(*)               return 0;;
+	esac
+}
+is_greater() { test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"; }
+is_greater_or_equal() { test "$(printf '%s\n' "$@" | sort -V | head -n 1)" = "$2"; }
+# shellcheck disable=SC3057
+is_https_url() { [ "${1:0:8}" = "https://" ]; }
+is_newline_ending() { [ "$(tail -c1 "$1" | wc -l)" -ne '0' ]; }
+is_present() { command -v "$1" >/dev/null 2>&1; }
+is_running() {
+	local i j
+	i="$(json 'get' 'status')"
+	j="$(ubus_get_data 'status')"
+	if [ "$i" = 'statusStopped' ] || [ -z "${i}${j}" ]; then
+		return 1
+	else
+		return 0
+	fi
+}
+ipset() { "$ipset" "$@" >/dev/null 2>&1; }
+get_version() { grep -m1 -A2 -w "^Package: $1$" /usr/lib/opkg/status | sed -n 's/Version: //p'; }
+get_ram_free() { ubus call system info | jsonfilter -e '@.memory.free'; }
+get_ram_total() { ubus call system info | jsonfilter -e '@.memory.total'; }
+led_on(){ if [ -n "${1}" ] && [ -e "${1}/trigger" ]; then echo 'default-on' > "${1}/trigger" 2>&1; fi; }
+led_off(){ if [ -n "${1}" ] &&  [ -e "${1}/trigger" ]; then echo 'none' > "${1}/trigger" 2>&1; fi; }
+logger() { /usr/bin/logger -t "$packageName" "$@"; }
+nft() { "$nft" "$@" >/dev/null 2>&1; }
+output_ok() { output 1 "$_OK_"; output 2 "$__OK__\\n"; }
+output_okn() { output 1 "$_OK_\\n"; output 2 "$__OK__\\n"; }
+output_fail() { output 1 "$_FAIL_"; output 2 "$__FAIL__\\n"; }
+output_failn() { output 1 "$_FAIL_\\n"; output 2 "$__FAIL__\\n"; }
+print_json_bool() { json_init; json_add_boolean "$1" "$2"; json_dump; json_cleanup; }
+print_json_int() { json_init; json_add_int "$1" "$2"; json_dump; json_cleanup; }
+print_json_string() { json_init; json_add_string "$1" "$2"; json_dump; json_cleanup; }
+sanitize_dir() { [ -d "$(readlink -fn "$1")" ] && readlink -fn "$1"; }
+str_contains() { test "$1" != "$(str_replace "$1" "$2" '')"; }
+str_contains_word() { echo "$1" | grep -q -w "$2"; }
+# shellcheck disable=SC2018,SC2019
+str_to_lower() { echo "$1" | tr 'A-Z' 'a-z'; }
+# shellcheck disable=SC2018,SC2019
+str_to_upper() { echo "$1" | tr 'a-z' 'A-Z'; }
+str_replace() { printf "%b" "$1" | sed -e "s/$(printf "%b" "$2")/$(printf "%b" "$3")/g"; }
+ubus_get_data() { ubus call service list "{ 'name': '$packageName' }" | jsonfilter -e "@['${packageName}'].instances.main.data.${1}"; }
+ubus_get_ports() { ubus call service list "{ 'name': '$packageName' }" | jsonfilter -e "@['${packageName}'].instances.main.data.firewall.*.dest_port"; }
+unbound_restart() { /etc/init.d/unbound restart >/dev/null 2>&1; }
+
+json() {
+# shellcheck disable=SC2034
+	local action="$1" param="$2" value="$3"
+	shift 3
+# shellcheck disable=SC2124
+	local extras="$@" line
+	local status message error stats
+	local reload restart curReload curRestart ret i
+	if [ -s "$jsonFile" ]; then
+		json_load_file "$jsonFile" 2>/dev/null
+		json_select 'data' 2>/dev/null
+		for i in status message error stats reload restart; do
+			json_get_var "$i" "$i" 2>/dev/null
+		done
+	fi
+	case "$action" in
+		get)
+			case "$param" in
+				triggers)
+# shellcheck disable=SC2154
+					curReload="$parallel_downloads $debug $download_timeout \
+						$allowed_domain $blocked_domain $allowed_url $blocked_url $dns \
+						$config_update_enabled $config_update_url $dnsmasq_config_file_url \
+						$curl_additional_param $curl_max_file_size $curl_retry"
+# shellcheck disable=SC2154
+					curRestart="$compressed_cache $compressed_cache_dir $force_dns $led \
+						$force_dns_port"
+					if [ ! -s "$jsonFile" ]; then
+						ret='on_boot'
+					elif [ "$curReload" != "$reload" ]; then
+						ret='download'
+					elif [ "$curRestart" != "$restart" ]; then
+						ret='restart'
+					fi
+					printf "%b" "$ret"
+					return;;
+				*)
+					printf "%b" "$(eval echo "\$$param")"; return;;
+			esac
+		;;
+		add)
+			line="$(eval echo "\$$param")"
+			eval "$param"='${line:+$line }${value}${extras:+|$extras}'
+		;;
+		del)
+			case "$param" in
+				all)
+					unset status message error stats;;
+				triggers) 
+					unset reload restart;;
+				*)
+					unset "$param";;
+			esac
+		;;
+		set)
+			case "$param" in
+				triggers) 
+					reload="$parallel_downloads $debug $download_timeout \
+						$allowed_domain $blocked_domain $allowed_url $blocked_url $dns \
+						$config_update_enabled $config_update_url $dnsmasq_config_file_url \
+						$curl_additional_param $curl_max_file_size $curl_retry"
+					restart="$compressed_cache $compressed_cache_dir $force_dns $led \
+						$force_dns_port"
+				;;
+				*)
+					eval "$param"='${value}${extras:+|$extras}';;
+			esac
+		;;
+	esac
+	json_init
+	json_add_object 'data'
+	json_add_string version "$PKG_VERSION"
+	json_add_string status "$status"
+	json_add_string message "$message"
+	json_add_string error "$error"
+	json_add_string stats "$stats"
+	json_add_string reload "$reload"
+	json_add_string restart "$restart"
+	json_close_object
+	mkdir -p "$(dirname "$jsonFile")"
+	json_dump > "$jsonFile"
+	sync
+}
+
+get_local_filesize() {
+	local file="$1" size
+	[ -f "$file" ] || return 0
+	if is_present stat; then
+		size="$(stat -c%s "$file")"
+	elif is_present wc; then
+		size="$(wc -c < "$file")"
+	fi
+# shellcheck disable=SC3037
+	echo -en "$size"
+}
+
+get_url_filesize() {
+	local url="$1" size size_command
+	[ -n "$url" ] || return 0
+	is_present 'curl' || return 0
+	size_command='curl --silent --insecure --fail --head --request GET'
+	size="$($size_command "$url" | grep -Po '^[cC]ontent-[lL]ength: \K\w+')"
+# shellcheck disable=SC3037
+	echo -en "$size"
+}
+
+output() {
+# Target verbosity level with the first parameter being an integer
+	is_integer() {
+		case "$1" in
+			(*[!0123456789]*) return 1;;
+			('')              return 1;;
+			(*)               return 0;;
+		esac
+	}
+	local msg memmsg logmsg text
+	local sharedMemoryOutput="/dev/shm/$packageName-output"
+	if [ -z "$verbosity" ] && [ -n "$packageName" ]; then
+		verbosity="$(uci -q get "$packageName.config.verbosity")"
+	fi
+	verbosity="${verbosity:-2}"
+	if [ $# -ne 1 ] && is_integer "$1"; then
+		if [ $((verbosity & $1)) -gt 0 ] || [ "$verbosity" = "$1" ]; then shift; text="$*"; else return 0; fi
+	fi
+	text="${text:-$*}";
+	[ -t 1 ] && printf "%b" "$text"
+# shellcheck disable=SC3060
+	msg="${text//$serviceName /service }";
+	if [ "$(printf "%b" "$msg" | wc -l)" -gt 0 ]; then
+		[ -s "$sharedMemoryOutput" ] && memmsg="$(cat "$sharedMemoryOutput")"
+		logmsg="$(printf "%b" "${memmsg}${msg}" | sed 's/\x1b\[[0-9;]*m//g')"
+		logger -t "${packageName:-service} [$$]" "$(printf "%b" "$logmsg")"
+		rm -f "$sharedMemoryOutput"
+	else
+		printf "%b" "$msg" >> "$sharedMemoryOutput"
+	fi
+}
 
 uci_add_list_if_new() {
 	local PACKAGE="$1"
@@ -110,8 +301,25 @@ uci_changes() {
 	/sbin/uci ${UCI_CONFIG_DIR:+-c $UCI_CONFIG_DIR} changes "$PACKAGE${CONFIG:+.$CONFIG}${OPTION:+.$OPTION}"
 }
 
-ipset() { "$ipset" "$@" >/dev/null 2>&1; }
-nft() { "$nft" "$@" >/dev/null 2>&1; }
+if type extra_command 1>/dev/null 2>&1; then
+	extra_command 'allow' 'Allows domain in current block-list and config'
+	extra_command 'check' 'Checks if specified domain is found in current block-list'
+	extra_command 'check_lists' 'Checks if specified domain is found in enabled block-lists'
+	extra_command 'dl' 'Force-downloads all enabled block-list'
+	extra_command 'killcache' 'Delete all cached files'
+	extra_command 'pause' 'Pauses AdBlocking for specified number of seconds (default: 60)'
+	extra_command 'sizes' 'Displays the file-sizes of enabled block-lists'
+	extra_command 'version' 'Show version information'
+else
+# shellcheck disable=SC2034
+	EXTRA_COMMANDS='allow check dl killcache pause sizes status_service version'
+# shellcheck disable=SC2034
+	EXTRA_HELP='	allow	Allows domain(s) in current block-list and config
+	check	Checks if specified domain is found in current block-list
+	dl	Force-downloads all enabled block-list
+	pause	Pauses AdBlocking for specified number of seconds (default: 60)
+	sizes	Displays the file-sizes of enabled block-lists'
+fi
 
 get_text() {
 	local r
@@ -248,6 +456,39 @@ load_network() {
 	done
 	json add error "errorNoWanGateway"
 	output "${_ERROR_}: $(get_text 'errorNoWanGateway')!\\n"; return 1;
+}
+
+append_url() {
+	local cfg="$1" var="$2"
+	local en action url
+	config_get_bool en "$cfg" enabled '1'
+	config_get action "$cfg" action 'block'
+	config_get url "$cfg" url
+	if [ "$en" = '1' ]; then
+		if [ "$action" = 'allow' ]; then
+			allowed_url="${allowed_url:+$allowed_url }${url}"
+		else
+			blocked_url="${blocked_url:+$blocked_url }${url}"
+		fi
+	fi
+}
+
+detect_file_type() {
+	local file="$1"
+	if [ "$(head -1 "$file")" = '[Adblock Plus]' ] || \
+		grep -q '^||' "$file"; then
+		echo 'adblockplus'
+	elif grep -q '^server=' "$file"; then
+		echo 'dnsmasq'
+	elif grep -q '^local=' "$file"; then
+		echo 'dnsmasq2'
+	elif grep -q '^address=' "$file"; then
+		echo 'dnsmasq3'
+	elif grep -q '^0\.0\.0\.0' "$file" || grep -q '^127\.0\.0\.1' "$file"; then
+		echo 'hosts'
+	elif [ -n "$(sed "$domainsFilter" "$file" | head -1)" ]; then
+		echo 'domains'
+	fi
 }
 
 load_environment() {
@@ -817,6 +1058,34 @@ download_dnsmasq_file() {
 }
 
 download_lists() {
+	_ram_check() {
+		_config_calculate_sizes() {
+			local cfg="$1"
+			local en size url
+			config_get_bool en "$cfg" enabled '1'
+			config_get size "$cfg" size
+			config_get url "$cfg" url
+			[ "$en" = '0' ] && return 0
+			[ -n "$size" ] || size="$(get_url_filesize "$url")"
+			[ -n "$size" ] && total_sizes=$((total_sizes+size))
+		}
+		local i free_mem total_sizes
+		free_mem="$(get_ram_free)"
+		if [ -z "$free_mem" ]; then
+			json add warnning 'warningFreeRamCheckFail'
+			output "${_WARNING_}: $(get_text 'warningFreeRamCheckFail')!\\n"
+			return 0
+		fi
+		config_load "$packageName"
+		config_foreach _config_calculate_sizes 'file_url'
+		if [ $((free_mem)) -lt $((total_sizes * 2)) ]; then
+			json add error 'errorTooLittleRam' "$free_mem"
+			output "${_ERROR_}: $(get_text 'errorTooLittleRam' "$free_mem")!\\n"
+			return 1
+		else
+			return 0
+		fi
+	}
 	local hf allow_filter j=0 R_TMP
 
 	json set message "$(get_text "statusDownloading")..."
@@ -1167,6 +1436,54 @@ adb_check() {
 			output "The '$string' is not found in current block-list ('$outputFile').\\n"
 		fi
 	done
+}
+
+adb_check_lists() {
+	_check_list() {
+		local cfg="$1"
+		local en size url R_TMP string c
+		config_get_bool en "$cfg" enabled '1'
+		config_get action "$cfg" action 'block'
+		config_get url "$cfg" url
+		[ "$en" = '0' ] && return 0
+		[ "$action" != 'block' ] && return 0
+		if is_https_url "$url" && [ -z "$isSSLSupported" ]; then
+			output "[DL] $url $__FAIL__\\n"
+		fi
+		while [ -z "$R_TMP" ] || [ -e "$R_TMP" ]; do
+			R_TMP="$(mktemp -u -q -t ${packageName}_tmp.XXXXXXXX)"
+		done
+		if [ -z "$url" ] || ! $dl_command "$url" "$dl_flag" "$R_TMP" 2>/dev/null || \
+			[ ! -s "$R_TMP" ]; then
+			output "[DL] $url $__FAIL__\\n"
+		else
+			append_newline "$R_TMP"
+			for string in ${param}; do
+				c="$(grep -c "$string" "$R_TMP")"
+				if [ "$c" -gt 0 ]; then
+					if [ "$c" -eq 1 ]; then
+						output "Found 1 match for '$string' in '$url'.\\n"
+					else
+						output "Found $c matches for '$string' in '$url'.\\n"
+					fi
+					grep "$string" "$R_TMP"
+				else
+					output "The '$string' is not found in '$url'.\\n"
+				fi
+			done
+		rm -f "$R_TMP"
+		fi
+	}
+	local param="$1"
+	local validation_result="$3"
+	load_environment "$validation_result" 'quiet' || return 1
+	if [ -z "$param" ]; then
+		output "Usage: /etc/init.d/${packageName} check_lists 'domain' ...\\n"
+		return 0
+	fi
+	config_load "$packageName"
+	config_foreach _check_list 'file_url'
+	return 0
 }
 
 adb_config_update() {
@@ -1534,7 +1851,7 @@ adb_pause() {
 	local validation_result="$3"
 	adb_stop 'on_pause' '' "$validation_result"
 	output "Sleeping for $timeout seconds... "
-	if sleep "$timeout"; then
+	if is_number "$timeout" && sleep "$timeout"; then
 		output_okn
 	else
 		output_failn
@@ -1544,10 +1861,16 @@ adb_pause() {
 
 allow() { load_validate_config 'config' adb_allow "'$*'"; }
 boot() {
+	local procd_boot_delay
 	ubus -t 30 wait_for network.interface 2>/dev/null
-	rc_procd start_service 'on_boot'
+	config_load "$packageName"
+	config_get procd_boot_delay 'config' 'procd_boot_delay' '0'
+# shellcheck disable=SC2154
+	{ is_integer "$procd_boot_delay" && sleep "$procd_boot_delay" || true; } && \
+		rc_procd start_service 'on_boot' && service_started 'on_boot' &
 }
 check() { load_validate_config 'config' adb_check "'$*'"; }
+check_lists() { load_validate_config 'config' adb_check_lists "'$*'"; }
 dl() { rc_procd start_service 'download'; }
 killcache() {
 	local compressed_cache_dir
