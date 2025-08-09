@@ -1,8 +1,9 @@
+# SPDX-License-Identifier: MIT
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=https-dns-proxy
 PKG_VERSION:=2025.05.11
-PKG_RELEASE:=1
+PKG_RELEASE:=4
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/aarond10/https_dns_proxy/
@@ -40,7 +41,7 @@ endef
 define Package/https-dns-proxy/description
 Light-weight DNS-over-HTTPS, non-caching translation proxy for the RFC 8484 DoH standard.
 It receives regular, unencrypted (UDP) DNS requests and resolves them via DoH resolver.
-Please see https://docs.openwrt.melmac.net/https-dns-proxy/ for more information.
+Please see https://docs.openwrt.melmac.ca/https-dns-proxy/ for more information.
 endef
 
 define Package/https-dns-proxy/conffiles

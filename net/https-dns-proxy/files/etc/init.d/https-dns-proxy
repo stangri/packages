@@ -3,7 +3,7 @@
 # shellcheck disable=SC1091,SC3043,SC3060
 
 # shellcheck disable=SC2034
-START=90
+START=25
 # shellcheck disable=SC2034
 STOP=15
 # shellcheck disable=SC2034
@@ -33,12 +33,22 @@ readonly canaryDomainsiCloud='mask.icloud.com mask-h2.icloud.com'
 hdp_boot_flag=
 
 dnsmasq_restart() { [ -x /etc/init.d/dnsmasq ] || return 1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; }
-is_alnum() { case "$1" in (*[![:alnum:]_@]*|"") return 1;; esac; }
+is_alnum() { case "$1" in (*[![:alnum:]_\ @]*|"") return 1;; esac; }
 is_fw4_restart_needed() { [ "$(uci_get "$packageName" 'config' 'force_dns' '1')" = '1' ]; }
 is_mac_address() { expr "$1" : '[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]$' >/dev/null; }
+is_integer() { case "$1" in ''|*[!0-9]*) return 1;; esac; }
 is_ipv4() { expr "$1" : '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$' >/dev/null; }
 is_ipv6() { ! is_mac_address "$1" && str_contains "$1" ":"; }
-is_resolver_working() { resolveip -t 3 one.one.one.one >/dev/null 2>&1; }
+is_resolver_working() { 
+	local heartbeat_domain heartbeat_sleep_timeout heartbeat_wait_timeout
+	config_load "$packageName"
+	config_get heartbeat_domain        'config' 'heartbeat_domain'        'heartbeat.melmac.ca'
+	config_get heartbeat_sleep_timeout 'config' 'heartbeat_sleep_timeout' '10'
+	config_get heartbeat_wait_timeout  'config' 'heartbeat_wait_timeout'  '30'
+	[ "$heartbeat_domain" = '-' ] && { hdp_boot_flag=1; return 0; }
+	is_integer "$heartbeat_sleep_timeout" && sleep "$heartbeat_sleep_timeout"
+	resolveip -t "$heartbeat_wait_timeout" "$heartbeat_domain" >/dev/null 2>&1
+}
 output() {
 	[ -z "$verbosity" ] && verbosity="$(uci_get "$packageName" 'config' 'verbosity' '1')"
 	[ "$#" -ne '1' ] && {
@@ -137,7 +147,6 @@ boot() {
 #	ubus -t 30 wait_for network.interface 2>/dev/null
 	rc_procd start_service 'on_boot' && service_started 'on_boot'
 	if ! is_resolver_working; then
-		hdp_boot_flag=1
 		rc_procd stop_service 'on_failed_health_check' && service_stopped 'on_failed_health_check'
 	fi
 }
@@ -245,6 +254,7 @@ start_service() {
 	config_get dnsmasq_config_update   'config' 'dnsmasq_config_update' '*'
 	config_get force_dns_port          'config' 'force_dns_port' '53 853'
 	config_get procd_fw_src_interfaces 'config' 'procd_fw_src_interfaces' 'lan'
+
 	if [ "$canary_domains_icloud" -ne 0 ]; then
 		canaryDomains="${canaryDomains:+$canaryDomains }${canaryDomainsiCloud}"
 	fi
