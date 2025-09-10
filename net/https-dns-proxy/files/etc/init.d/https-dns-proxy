@@ -3,7 +3,7 @@
 # shellcheck disable=SC1091,SC3043,SC3060
 
 # shellcheck disable=SC2034
-START=90
+START=25
 # shellcheck disable=SC2034
 STOP=15
 # shellcheck disable=SC2034
@@ -33,12 +33,22 @@ readonly canaryDomainsiCloud='mask.icloud.com mask-h2.icloud.com'
 hdp_boot_flag=
 
 dnsmasq_restart() { [ -x /etc/init.d/dnsmasq ] || return 1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; }
-is_alnum() { case "$1" in (*[![:alnum:]_@]*|"") return 1;; esac; }
+is_alnum() { case "$1" in (*[![:alnum:]_\ @]*|"") return 1;; esac; }
 is_fw4_restart_needed() { [ "$(uci_get "$packageName" 'config' 'force_dns' '1')" = '1' ]; }
 is_mac_address() { expr "$1" : '[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]$' >/dev/null; }
+is_integer() { case "$1" in ''|*[!0-9]*) return 1;; esac; }
 is_ipv4() { expr "$1" : '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$' >/dev/null; }
 is_ipv6() { ! is_mac_address "$1" && str_contains "$1" ":"; }
-is_resolver_working() { resolveip -t 3 one.one.one.one >/dev/null 2>&1; }
+is_resolver_working() { 
+	local heartbeat_domain heartbeat_sleep_timeout heartbeat_wait_timeout
+	config_load "$packageName"
+	config_get heartbeat_domain        'config' 'heartbeat_domain'        'heartbeat.melmac.ca'
+	config_get heartbeat_sleep_timeout 'config' 'heartbeat_sleep_timeout' '10'
+	config_get heartbeat_wait_timeout  'config' 'heartbeat_wait_timeout'  '30'
+	[ "$heartbeat_domain" = '-' ] && { hdp_boot_flag=1; return 0; }
+	is_integer "$heartbeat_sleep_timeout" && sleep "$heartbeat_sleep_timeout"
+	resolveip -t "$heartbeat_wait_timeout" "$heartbeat_domain" >/dev/null 2>&1
+}
 output() {
 	[ -z "$verbosity" ] && verbosity="$(uci_get "$packageName" 'config' 'verbosity' '1')"
 	[ "$#" -ne '1' ] && {
@@ -55,7 +65,7 @@ output_ok() { output "$_OK_"; }
 output_okn() { output "${_OK_}\\n"; }
 output_fail() { output "$_FAIL_"; }
 output_failn() { output "${_FAIL_}\\n"; }
-str_contains() { [ -n "$1" ] &&[ -n "$2" ] && [ "${1//$2}" != "$1" ]; }
+str_contains() { [ "${1//$2}" != "$1" ]; }
 str_contains_word() { echo "$1" | grep -qw "$2"; }
 uci_add_list_if_new() {
 	local PACKAGE="$1"
@@ -94,9 +104,10 @@ append_parm() {
 	local option="$2"
 	local switch="$3"
 	local default="$4"
+	local skip_value="$5"
 	local _loctmp
 	config_get _loctmp "$section" "$option" "$default"
-	[ -n "$_loctmp" ] && xappend "$switch $_loctmp"
+	[ -n "$_loctmp" ] && [ "$_loctmp" != "$skip_value" ] && xappend "$switch $_loctmp"
 }
 
 append_counter() {
@@ -123,21 +134,20 @@ append_bootstrap() {
 	[ -z "$_loctmp" ] && return 0
 	IFS=" ,"
 	for i in $_loctmp; do
-		if { [ "$ipv6_resolvers_only" -eq 0 ] && is_ipv4 "$i"; } || \
-			{ [ "$ipv6_resolvers_only" -ne 0 ] && is_ipv6 "$i"; }; then
+		if { [ "$force_ipv6" -eq 0 ] && is_ipv4 "$i"; } || \
+			{ [ "$force_ipv6" -ne 0 ] && is_ipv6 "$i"; }; then
 			[ -z "$_newtmp" ] && _newtmp="$i" || _newtmp="${_newtmp},${i}"
 		fi
 	done
 	IFS="$_old_ifs"
 	[ -n "$_newtmp" ] && xappend "$switch $_newtmp"
-	[ "$ipv6_resolvers_only" -eq 0 ] && xappend '-4'
+	[ "$force_ipv6" -eq 0 ] && xappend '-4'
 }
 
 boot() {
 #	ubus -t 30 wait_for network.interface 2>/dev/null
 	rc_procd start_service 'on_boot' && service_started 'on_boot'
 	if ! is_resolver_working; then
-		hdp_boot_flag=1
 		rc_procd stop_service 'on_failed_health_check' && service_stopped 'on_failed_health_check'
 	fi
 }
@@ -145,26 +155,33 @@ boot() {
 start_instance() {
 	local cfg="$1" param="$2"
 	local PROG_param
-	local listen_addr listen_port ipv6_resolvers_only p url iface
+	local listen_addr listen_port force_ipv6 p url iface
 
-	config_get url "$cfg" 'resolver_url'
-	config_get_bool ipv6_resolvers_only "$cfg" 'use_ipv6_resolvers_only' '0'
-	append_parm "$cfg" 'resolver_url' '-r'
-	append_parm "$cfg" 'listen_addr' '-a' '127.0.0.1'
-	append_parm "$cfg" 'listen_port' '-p' "$port"
-	append_parm "$cfg" 'dscp_codepoint' '-c'
+	config_get url             "$cfg" 'resolver_url'
+	config_get listen_addr     "$cfg" 'listen_addr' "$global_listen_addr"
+	config_get listen_port     "$cfg" 'listen_port' "$port"
+	config_get_bool force_ipv6 "$cfg" 'force_ipv6_resolvers' "$global_force_ipv6"
+
+	append_parm "$cfg" 'resolver_url'       '-r'
+	append_parm "$cfg" 'listen_addr'        '-a' "$global_listen_addr"        '127.0.0.1'
+	append_parm "$cfg" 'listen_port'        '-p' "$port"
 	append_bootstrap "$cfg" 'bootstrap_dns' '-b' "$DEFAULT_BOOTSTRAP"
-	append_parm "$cfg" 'user' '-u' 'nobody'
-	append_parm "$cfg" 'group' '-g' 'nogroup'
-	append_parm "$cfg" 'ca_certs_file' '-C'
-	append_parm "$cfg" 'polling_interval' '-i'
-	append_parm "$cfg" 'proxy_server' '-t'
-	append_parm "$cfg" 'logfile' '-l'
-	append_bool "$cfg" 'use_http1' '-x'
-	append_counter "$cfg" 'verbosity' '-v' '0'
+	append_parm "$cfg" 'dscp_codepoint'     '-c'
+	append_parm "$cfg" 'tcp_client_limit'   '-T' "$global_tcp_client_limit"   '20'
+	append_parm "$cfg" 'polling_interval'   '-i' "$global_polling_interval"   '120'
+	append_parm "$cfg" 'proxy_server'       '-t' "$global_proxy_server"
+	append_bool "$cfg" 'force_http1'        '-x' "$global_force_http1"
+	append_bool "$cfg" 'force_http3'        '-q' "$global_force_http3"
+	append_parm "$cfg" 'max_idle_time'      '-m' "$global_max_idle_time"      '118'
+	append_parm "$cfg" 'conn_loss_time'     '-L' "$global_conn_loss_time"     '15'
+	append_parm "$cfg" 'ca_certs_file'      '-C' "$global_ca_certs_file"
+	append_parm "$cfg" 'user'               '-u' "$global_user"
+	append_parm "$cfg" 'group'              '-g' "$global_group"
+	append_parm "$cfg" 'logfile'            '-l' "$global_logfile"
+	append_parm "$cfg" 'statistic_interval' '-s' "$global_statistic_interval" '0'
+	append_parm "$cfg" 'log_limit'          '-F' "$global_log_limit"          '0'
+	append_counter "$cfg" 'verbosity'       '-v' "$global_verbosity"
 
-	config_get listen_addr "$cfg" 'listen_addr' '127.0.0.1'
-	config_get listen_port "$cfg" 'listen_port' "$port"
 	if [ "$dnsmasq_config_update" = '*' ]; then
 		config_load 'dhcp'
 		config_foreach dnsmasq_doh_server 'dnsmasq' 'add' "${listen_addr}" "${listen_port}"
@@ -190,7 +207,7 @@ start_instance() {
 	json_close_object
 	if [ "$force_dns" -ne '0' ]; then
 		json_add_array firewall
-		for iface in ${procd_fw_src_interfaces/,/ }; do
+		for iface in ${force_dns_src_interface/,/ }; do
 			for p in ${force_dns_port/,/ }; do
 				if netstat -tuln | grep 'LISTEN' | grep ":${p}" >/dev/null 2>&1 || [ "$p" = '53' ]; then
 					json_add_object ''
@@ -234,17 +251,51 @@ start_service() {
 	local param="$1"
 	local canaryDomains canary_domains_icloud canary_domains_mozilla
 	local dnsmasq_config_update force_dns force_dns_port 
-	local procd_fw_src_interfaces
+	local force_dns_src_interface
 	local port=5053
+
+	local global_listen_addr
+	local global_tcp_client_limit
+	local global_polling_interval
+	local global_proxy_server
+	local global_force_http1
+	local global_force_http3
+	local global_force_ipv6
+	local global_max_idle_time
+	local global_conn_loss_time
+	local global_ca_certs_file
+	local global_user
+	local global_group
+	local global_verbosity
+	local global_logfile
+	local global_statistic_interval
+	local global_log_limit
 
 	output "Starting $serviceName instances ${param:+$param }"
 	config_load "$packageName"
 	config_get_bool canary_domains_icloud  'config' 'canary_domains_icloud' '1'
 	config_get_bool canary_domains_mozilla 'config' 'canary_domains_mozilla' '1'
-	config_get_bool force_dns          'config' 'force_dns' '1'
-	config_get dnsmasq_config_update   'config' 'dnsmasq_config_update' '*'
-	config_get force_dns_port          'config' 'force_dns_port' '53 853'
-	config_get procd_fw_src_interfaces 'config' 'procd_fw_src_interfaces' 'lan'
+	config_get_bool force_dns              'config' 'force_dns' '1'
+	config_get dnsmasq_config_update       'config' 'dnsmasq_config_update' '*'
+	config_get force_dns_port              'config' 'force_dns_port' '53 853'
+	config_get force_dns_src_interface     'config' 'force_dns_src_interface' 'lan'
+	config_get global_listen_addr          'config' 'listen_addr' '127.0.0.1'
+	config_get global_tcp_client_limit     'config' 'tcp_client_limit' '20'
+	config_get global_polling_interval     'config' 'polling_interval' '120'
+	config_get global_proxy_server         'config' 'proxy_server'
+	config_get_bool global_force_http1     'config' 'force_http1' '0'
+	config_get_bool global_force_http3     'config' 'force_http3' '0'
+	config_get_bool global_force_ipv6      'config' 'global_force_ipv6_resolvers' '0'
+	config_get global_max_idle_time        'config' 'max_idle_time' '118'
+	config_get global_conn_loss_time       'config' 'conn_loss_time' '15'
+	config_get global_ca_certs_file        'config' 'ca_certs_file'
+	config_get global_user                 'config' 'user' 'nobody'
+	config_get global_group                'config' 'group' 'nogroup'
+	config_get global_verbosity            'config' 'verbosity' '0'
+	config_get global_logfile              'config' 'logfile'
+	config_get global_statistic_interval   'config' 'statistic_interval' '0'
+	config_get global_log_limit            'config' 'log_limit' '0'
+
 	if [ "$canary_domains_icloud" -ne 0 ]; then
 		canaryDomains="${canaryDomains:+$canaryDomains }${canaryDomainsiCloud}"
 	fi
