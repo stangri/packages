@@ -4,8 +4,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=pbr
-PKG_VERSION:=1.2.0
-PKG_RELEASE:=6
+PKG_VERSION:=1.2.1
+PKG_RELEASE:=41
 PKG_LICENSE:=AGPL-3.0-or-later
 PKG_MAINTAINER:=Stan Grishin <stangri@melmac.ca>
 
@@ -33,12 +33,6 @@ $(call Package/pbr/default)
   DEFAULT_VARIANT:=1
 endef
 
-define Package/pbr-netifd
-$(call Package/pbr/default)
-  TITLE+= with nft/nft set and netifd support
-  VARIANT:=netifd
-endef
-
 define Package/pbr/default/description
   This service enables policy-based routing for WAN interfaces and various VPN tunnels.
 endef
@@ -48,18 +42,11 @@ define Package/pbr/description
   This version supports OpenWrt (23.05 and newer) with firewall4/nft.
 endef
 
-define Package/pbr-netifd/description
-  $(call Package/pbr/default/description)
-  This version supports OpenWrt with (23.05 and newer) firewall4/nft.
-  This version uses OpenWrt native netifd/tables to set up interfaces. This is a WIP.
-endef
-
 define Package/pbr/default/conffiles
 /etc/config/pbr
 endef
 
 Package/pbr/conffiles = $(Package/pbr/default/conffiles)
-Package/pbr-netifd/conffiles = $(Package/pbr/default/conffiles)
 
 define Build/Configure
 endef
@@ -90,19 +77,14 @@ $(call Package/pbr/default/install,$(1))
 	$(INSTALL_BIN)  ./files/etc/uci-defaults/91-pbr-nft $(1)/etc/uci-defaults/91-pbr-nft
 endef
 
-define Package/pbr-netifd/install
-$(call Package/pbr/default/install,$(1))
-	$(INSTALL_DIR) $(1)/etc/uci-defaults
-	$(INSTALL_BIN)  ./files/etc/uci-defaults/91-pbr-netifd $(1)/etc/uci-defaults/91-pbr-netifd
-endef
-
 define Package/pbr/postinst
 #!/bin/sh
 # check if we are on real system
 if [ -z "$${IPKG_INSTROOT}" ]; then
-	chmod -x /etc/init.d/pbr || true
-	fw4 -q reload || true
-	chmod +x /etc/init.d/pbr || true
+	/etc/init.d/pbr netifd check && {
+		echo -n "Reinstalling pbr netifd integration... "
+		/etc/init.d/pbr netifd install >/dev/null 2>&1 && echo "OK" || echo "FAIL"
+	}
 	echo -n "Installing rc.d symlink for pbr... "
 	/etc/init.d/pbr enable && echo "OK" || echo "FAIL"
 fi
@@ -117,6 +99,10 @@ if [ -z "$${IPKG_INSTROOT}" ]; then
 	/etc/init.d/pbr stop quiet >/dev/null 2>&1 && echo "OK" || echo "FAIL"
 	echo -n "Removing rc.d symlink for pbr... "
 	/etc/init.d/pbr disable && echo "OK" || echo "FAIL"
+	/etc/init.d/pbr netifd check && {
+		echo -n "Uninstalling pbr netifd integration... "
+		/etc/init.d/pbr netifd uninstall >/dev/null 2>&1 && echo "OK" || echo "FAIL"
+	}
 fi
 exit 0
 endef
@@ -130,60 +116,4 @@ fi
 exit 0
 endef
 
-define Package/pbr-netifd/postinst
-#!/bin/sh
-# check if we are on real system
-if [ -z "$${IPKG_INSTROOT}" ]; then
-	chmod -x /etc/init.d/pbr || true
-	fw4 -q reload || true
-	chmod +x /etc/init.d/pbr || true
-	echo -n "Installing rc.d symlink for pbr-netifd... "
-	/etc/init.d/pbr enable && echo "OK" || echo "FAIL"
-fi
-exit 0
-endef
-
-define Package/pbr-netifd/prerm
-#!/bin/sh
-# check if we are on real system
-if [ -z "$${IPKG_INSTROOT}" ]; then
-	echo -n "Stopping pbr-netifd service... "
-	/etc/init.d/pbr stop quiet >/dev/null 2>&1 && echo "OK" || echo "FAIL"
-	echo -n "Removing rc.d symlink for pbr... "
-	/etc/init.d/pbr disable && echo "OK" || echo "FAIL"
-	echo -n "Cleaning up /etc/iproute2/rt_tables... "
-	if sed -i '/pbr_/d' /etc/iproute2/rt_tables; then
-		echo "OK"
-	else
-		echo "FAIL"
-	fi
-	echo -n "Cleaning up /etc/config/network... "
-	uci -q delete 'network.pbr_default' || true
-	uci -q delete 'network.pbr_default6' || true
-	uci commit network || true
-	if sed -i '/ip.table.*pbr_/d' /etc/config/network; then
-		echo "OK"
-	else
-		echo "FAIL"
-	fi
-	echo -n "Restarting Network... "
-	if /etc/init.d/network restart >/dev/null 2>&1; then
-		echo "OK"
-	else
-		echo "FAIL"
-	fi
-fi
-exit 0
-endef
-
-define Package/pbr-netifd/postrm
-#!/bin/sh
-# check if we are on real system
-if [ -z "$${IPKG_INSTROOT}" ]; then
-	fw4 -q reload || true
-fi
-exit 0
-endef
-
 $(eval $(call BuildPackage,pbr))
-# $(eval $(call BuildPackage,pbr-netifd))
